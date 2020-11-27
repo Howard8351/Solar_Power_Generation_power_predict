@@ -8,12 +8,12 @@ import random
 import math
 
 #超參數設定
-data_contain_days   = 3
-data_predict_days   = 2
-epochs              = 1
-batch_size          = 32
-learning_rate       = 0.0001
-weather_data_path   = "Plant_1_Weather_Sensor_Data.csv"
+data_contain_days    = 3
+data_predict_days    = 2
+epochs               = 1
+batch_size           = 32
+learning_rate        = 0.001
+weather_data_path    = "Plant_1_Weather_Sensor_Data.csv"
 generation_data_path = "Plant_1_Generation_Data.csv"
 
 class power_generation_predict():
@@ -34,6 +34,8 @@ class power_generation_predict():
         self.train_data_steps_each_epoch        = None
         self.test_dataset                       = None
         self.test_data_steps_each_epoch         = None
+        self.data_max                           = None
+        self.data_min                           = None
 
     def load_csv_file(self):
         #匯入資料
@@ -43,7 +45,12 @@ class power_generation_predict():
         self.weather_data   = tf.convert_to_tensor(self.weather_data.numpy()[1:])
         csv_column_datatype = [str(), int(), str(), float(), float(), float()]
         self.weather_data   = tf.io.decode_csv(self.weather_data, csv_column_datatype)
-        
+        weatherdata_max     = []
+        weatherdata_min     = []
+        for index in range(3, len(self.weather_data)):
+            weatherdata_max.append(tf.math.reduce_max(self.weather_data[index]))
+            weatherdata_min.append(tf.math.reduce_min(self.weather_data[index]))
+
         #匯入資料
         self.generation_data = tf.io.read_file(self.generation_data_path)
         #以分隔符號將資料分割並移除header
@@ -51,6 +58,14 @@ class power_generation_predict():
         self.generation_data = tf.convert_to_tensor(self.generation_data.numpy()[1:])
         csv_column_datatype  = [str(), int(), str(), float(), float(), float(), float()]
         self.generation_data = tf.io.decode_csv(self.generation_data, csv_column_datatype)
+        generation_data_max  = []
+        generation_data_min  = []
+        for index in range(3, 5):
+            generation_data_max.append(tf.math.reduce_max(self.generation_data[index]))
+            generation_data_min.append(tf.math.reduce_min(self.generation_data[index]))
+
+        self.data_max = tf.convert_to_tensor(generation_data_max + weatherdata_max)
+        self.data_min = tf.convert_to_tensor(generation_data_min + weatherdata_min)
 
     def change_generation_datetime_format(self):
         #修改時間格式讓兩個資料集能相符
@@ -140,7 +155,9 @@ class power_generation_predict():
         return tf.convert_to_tensor(train_data), tf.convert_to_tensor(test_data)
 
     def recurrent_data_process(self, recurrent_data):
+        recurrent_data= (recurrent_data - self.data_min) / (self.data_max - self.data_min) 
         number_of_data_each_day = 96
+
         recurrent_data, predict_data = tf.split(recurrent_data,
                                                 [number_of_data_each_day * self.data_contain_days,
                                                  number_of_data_each_day * self.data_predict_days],
@@ -157,9 +174,10 @@ class power_generation_predict():
         #a_day_ac_power    = predict_ac_power[0]
         #two_days_ac_power = predict_ac_power[1]
 
-        return (recurrent_data, a_day_dc_power)
+        return (recurrent_data, [a_day_dc_power])
 
     def recurrent_label_1_process(self, recurrent_data):
+        recurrent_data= (recurrent_data - self.data_min) / (self.data_max - self.data_min)
         number_of_data_each_day = 96
         recurrent_data, predict_data = tf.split(recurrent_data,
                                                 [number_of_data_each_day * self.data_contain_days,
@@ -180,6 +198,7 @@ class power_generation_predict():
         return a_day_dc_power
 
     def recurrent_label_2_process(self, recurrent_data):
+        recurrent_data= (recurrent_data - self.data_min) / (self.data_max - self.data_min)
         number_of_data_each_day = 96
         recurrent_data, predict_data = tf.split(recurrent_data,
                                                 [number_of_data_each_day * self.data_contain_days,
@@ -200,6 +219,7 @@ class power_generation_predict():
         return a_day_ac_power
 
     def recurrent_label_3_process(self, recurrent_data):
+        recurrent_data= (recurrent_data - self.data_min) / (self.data_max - self.data_min)
         number_of_data_each_day = 96
         recurrent_data, predict_data = tf.split(recurrent_data,
                                                 [number_of_data_each_day * self.data_contain_days,
@@ -220,6 +240,7 @@ class power_generation_predict():
         return two_days_dc_power
 
     def recurrent_label_4_process(self, recurrent_data):
+        recurrent_data= (recurrent_data - self.data_min) / (self.data_max - self.data_min)
         number_of_data_each_day = 96
         recurrent_data, predict_data = tf.split(recurrent_data,
                                                 [number_of_data_each_day * self.data_contain_days,
@@ -243,6 +264,10 @@ class power_generation_predict():
         data_size = data_list.shape[0]
         dataset   = Dataset.from_tensor_slices(data_list)
         
+        test = iter(dataset)
+        a = test.get_next()
+        self.recurrent_data_process(a)
+
         dataset = dataset.map(self.recurrent_data_process, num_parallel_calls = tf.data.experimental.AUTOTUNE)
         #data    = dataset.map(self.recurrent_data_process, num_parallel_calls = tf.data.experimental.AUTOTUNE)
         #label_1 = dataset.map(self.recurrent_label_1_process, num_parallel_calls = tf.data.experimental.AUTOTUNE)
