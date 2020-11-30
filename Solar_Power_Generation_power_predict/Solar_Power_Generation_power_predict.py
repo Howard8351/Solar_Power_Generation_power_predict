@@ -7,10 +7,25 @@ import time
 import random
 import math
 
+
+try:
+    #取得實體GPU數量
+    gpus = tf.config.experimental.list_physical_devices('GPU')
+    if gpus:
+        for gpu in gpus:
+        #將GPU記憶體使用率設為動態成長
+        #有建立虛擬GPU時不可使用
+            #tf.config.experimental.set_memory_growth(gpu, True)
+        #建立虛擬GPU
+            tf.config.experimental.set_virtual_device_configuration(
+                gpu, [tf.config.experimental.VirtualDeviceConfiguration(memory_limit = 800)])
+except Exception as e:
+    print(e)
+
 #超參數設定
 data_contain_days    = 3
 data_predict_days    = 2
-epochs               = 10
+epochs               = 100
 batch_size           = 32
 learning_rate        = 0.001
 weather_data_path    = "Plant_1_Weather_Sensor_Data.csv"
@@ -36,6 +51,7 @@ class power_generation_predict():
         self.test_data_steps_each_epoch         = None
         self.data_max                           = None
         self.data_min                           = None
+        self.number_of_data_to_resampling       = None
 
     def load_csv_file(self):
         #匯入資料
@@ -124,29 +140,51 @@ class power_generation_predict():
             inveter_data_keep_index_list.append(index)
 
     def creat_train_data_and_test_data(self):
-        #資料是以15分鐘為取樣頻率
-        #一天大約有96筆
-        number_of_data_each_day = 96
-        #每筆資料間隔一小時
-        data_shift_range = 4
-        train_data = []
-        test_data  = []
+        random.seed(10)
+        train_data       = []
+        test_data        = []
         for inverter_index in range(len(self.generation_data_split_by_inverter)):
-            data_list   = []
-            start_index = 0
-            max_index   = self.generation_data_split_by_inverter[inverter_index].shape[0]
             generation_data = tf.concat(values = [self.generation_data_split_by_inverter[inverter_index], self.weather_data_match_by_inveter_date[inverter_index]],
                                         axis = 1)
+
+            #將資料重新取樣成每小時一次
+            keep_resampling                   = True
+            resampling_start_index            = 0
+            max_resampling_index              = generation_data.shape[0]
+            data_sampling_by_a_hour           = []
+            self.number_of_data_to_resampling = 4
+            while keep_resampling:
+                if resampling_start_index + self.number_of_data_to_resampling < max_resampling_index:
+                    resampling_end_index = resampling_start_index + self.number_of_data_to_resampling
+                else:
+                    resampling_start_index = max_resampling_index - self.number_of_data_to_resampling
+                    resampling_end_index   = max_resampling_index
+                    keep_resampling        = False
+                    
+                data_sampling_by_a_hour.append(tf.math.reduce_mean(generation_data[resampling_start_index:resampling_end_index],
+                                                                   axis = 0))
+                resampling_start_index = resampling_end_index 
+
+            generation_data = tf.convert_to_tensor(data_sampling_by_a_hour)
+
+            #資料是以15分鐘為取樣頻率
+            #一天大約有96筆
+            number_of_data_each_day = int(96 / self.number_of_data_to_resampling)
+            #每筆資料間隔一小時
+            data_shift_range = int(4 / self.number_of_data_to_resampling)
+            data_list        = []
+            start_index      = 0
+            max_index        = generation_data.shape[0]
             keep_loop = True
             while keep_loop:
-                if start_index + (number_of_data_each_day * (self.data_contain_days + self.data_predict_days)) <= max_index:
+                if start_index + (number_of_data_each_day * (self.data_contain_days + self.data_predict_days)) < max_index:
                     end_index = start_index + (number_of_data_each_day * (self.data_contain_days + self.data_predict_days))
                 else:
                     start_index = max_index - (number_of_data_each_day * (self.data_contain_days + self.data_predict_days))
                     end_index   = max_index
                     keep_loop = False
 
-                data_list.append(generation_data[start_index:end_index, :])
+                data_list.append(generation_data[start_index:end_index])
                 start_index += data_shift_range 
                 
             data_list  = random.sample(data_list, len(data_list))
@@ -155,110 +193,30 @@ class power_generation_predict():
         return tf.convert_to_tensor(train_data), tf.convert_to_tensor(test_data)
 
     def recurrent_data_process(self, recurrent_data):
-        recurrent_data= (recurrent_data - self.data_min) / (self.data_max - self.data_min) 
-        number_of_data_each_day = 96
+        #將資料做0~1正規化
+        recurrent_data = (recurrent_data - self.data_min) / (self.data_max - self.data_min)
+        #原始資料是15分鐘取樣一次
+        #目前已改成1小時取樣一次
+        number_of_data_each_day = int(96 / self.number_of_data_to_resampling) 
 
         recurrent_data, predict_data = tf.split(recurrent_data,
                                                 [number_of_data_each_day * self.data_contain_days,
                                                  number_of_data_each_day * self.data_predict_days],
                                                  0)
+        
         predict_dc_power, predict_ac_power, predict_weather_data = tf.split(predict_data, [1, 1, predict_data.shape[1] - 2], 1)
         #predict_dc_power  = tf.squeeze(predict_dc_power)
         #predict_ac_power  = tf.squeeze(predict_ac_power)
-        #a_day_dc_power    = tf.math.reduce_sum(predict_dc_power[0:number_of_data_each_day])
-        #two_days_dc_power = tf.math.reduce_sum(predict_dc_power)
-        #a_day_ac_power    = tf.math.reduce_sum(predict_ac_power[0:number_of_data_each_day])
-        #two_days_ac_power = tf.math.reduce_sum(predict_ac_power)
-        a_day_dc_power    = predict_dc_power[0]
-        two_days_dc_power = predict_dc_power[1]
-        a_day_ac_power    = predict_ac_power[0]
-        two_days_ac_power = predict_ac_power[1]
+        a_day_dc_power    = tf.math.reduce_sum(predict_dc_power[0:number_of_data_each_day])
+        two_days_dc_power = tf.math.reduce_sum(predict_dc_power)
+        a_day_ac_power    = tf.math.reduce_sum(predict_ac_power[0:number_of_data_each_day])
+        two_days_ac_power = tf.math.reduce_sum(predict_ac_power)
+        #dc_power_15_minutes = predict_dc_power[0]
+        #dc_power_half_hour  = predict_dc_power[1]
+        #dc_power_a_hour     = predict_dc_power[3]
+        #dc_power_two_hours  = predict_dc_power[7]
 
-        return (recurrent_data, (a_day_dc_power, a_day_dc_power, two_days_dc_power, two_days_ac_power))
-
-    def recurrent_label_1_process(self, recurrent_data):
-        recurrent_data= (recurrent_data - self.data_min) / (self.data_max - self.data_min)
-        number_of_data_each_day = 96
-        recurrent_data, predict_data = tf.split(recurrent_data,
-                                                [number_of_data_each_day * self.data_contain_days,
-                                                 number_of_data_each_day * self.data_predict_days],
-                                                 0)
-        predict_dc_power, predict_ac_power, predict_weather_data = tf.split(predict_data, [1, 1, predict_data.shape[1] - 2], 1)
-        predict_dc_power  = tf.squeeze(predict_dc_power)
-        #predict_ac_power  = tf.squeeze(predict_ac_power)
-        #a_day_dc_power    = tf.math.reduce_sum(predict_dc_power[0:number_of_data_each_day])
-        #two_days_dc_power = tf.math.reduce_sum(predict_dc_power)
-        #a_day_ac_power    = tf.math.reduce_sum(predict_ac_power[0:number_of_data_each_day])
-        #two_days_ac_power = tf.math.reduce_sum(predict_ac_power)
-        a_day_dc_power    = predict_dc_power[0]
-        #two_days_dc_power = predict_dc_power[1]
-        #a_day_ac_power    = predict_ac_power[0]
-        #two_days_ac_power = predict_ac_power[1]
-
-        return a_day_dc_power
-
-    def recurrent_label_2_process(self, recurrent_data):
-        recurrent_data= (recurrent_data - self.data_min) / (self.data_max - self.data_min)
-        number_of_data_each_day = 96
-        recurrent_data, predict_data = tf.split(recurrent_data,
-                                                [number_of_data_each_day * self.data_contain_days,
-                                                 number_of_data_each_day * self.data_predict_days],
-                                                 0)
-        predict_dc_power, predict_ac_power, predict_weather_data = tf.split(predict_data, [1, 1, predict_data.shape[1] - 2], 1)
-        #predict_dc_power  = tf.squeeze(predict_dc_power)
-        predict_ac_power  = tf.squeeze(predict_ac_power)
-        #a_day_dc_power    = tf.math.reduce_sum(predict_dc_power[0:number_of_data_each_day])
-        #two_days_dc_power = tf.math.reduce_sum(predict_dc_power)
-        #a_day_ac_power    = tf.math.reduce_sum(predict_ac_power[0:number_of_data_each_day])
-        #two_days_ac_power = tf.math.reduce_sum(predict_ac_power)
-        #a_day_dc_power    = predict_dc_power[0]
-        #two_days_dc_power = predict_dc_power[1]
-        a_day_ac_power    = predict_ac_power[0]
-        #two_days_ac_power = predict_ac_power[1]
-
-        return a_day_ac_power
-
-    def recurrent_label_3_process(self, recurrent_data):
-        recurrent_data= (recurrent_data - self.data_min) / (self.data_max - self.data_min)
-        number_of_data_each_day = 96
-        recurrent_data, predict_data = tf.split(recurrent_data,
-                                                [number_of_data_each_day * self.data_contain_days,
-                                                 number_of_data_each_day * self.data_predict_days],
-                                                 0)
-        predict_dc_power, predict_ac_power, predict_weather_data = tf.split(predict_data, [1, 1, predict_data.shape[1] - 2], 1)
-        predict_dc_power  = tf.squeeze(predict_dc_power)
-        #predict_ac_power  = tf.squeeze(predict_ac_power)
-        #a_day_dc_power    = tf.math.reduce_sum(predict_dc_power[0:number_of_data_each_day])
-        #two_days_dc_power = tf.math.reduce_sum(predict_dc_power)
-        #a_day_ac_power    = tf.math.reduce_sum(predict_ac_power[0:number_of_data_each_day])
-        #two_days_ac_power = tf.math.reduce_sum(predict_ac_power)
-        #a_day_dc_power    = predict_dc_power[0]
-        two_days_dc_power = predict_dc_power[1]
-        #a_day_ac_power    = predict_ac_power[0]
-        #two_days_ac_power = predict_ac_power[1]
-
-        return two_days_dc_power
-
-    def recurrent_label_4_process(self, recurrent_data):
-        recurrent_data= (recurrent_data - self.data_min) / (self.data_max - self.data_min)
-        number_of_data_each_day = 96
-        recurrent_data, predict_data = tf.split(recurrent_data,
-                                                [number_of_data_each_day * self.data_contain_days,
-                                                 number_of_data_each_day * self.data_predict_days],
-                                                 0)
-        predict_dc_power, predict_ac_power, predict_weather_data = tf.split(predict_data, [1, 1, predict_data.shape[1] - 2], 1)
-        #predict_dc_power  = tf.squeeze(predict_dc_power)
-        predict_ac_power  = tf.squeeze(predict_ac_power)
-        #a_day_dc_power    = tf.math.reduce_sum(predict_dc_power[0:number_of_data_each_day])
-        #two_days_dc_power = tf.math.reduce_sum(predict_dc_power)
-        #a_day_ac_power    = tf.math.reduce_sum(predict_ac_power[0:number_of_data_each_day])
-        #two_days_ac_power = tf.math.reduce_sum(predict_ac_power)
-        #a_day_dc_power    = predict_dc_power[0]
-        #two_days_dc_power = predict_dc_power[1]
-        #a_day_ac_power    = predict_ac_power[0]
-        two_days_ac_power = predict_ac_power[1]
-
-        return two_days_ac_power
+        return (recurrent_data, (a_day_dc_power, a_day_ac_power, two_days_dc_power, two_days_ac_power))
 
     def creat_recurrent_dataset(self, data_list, shuffle = True):
         data_size = data_list.shape[0]
@@ -288,21 +246,18 @@ class power_generation_predict():
 
     def creat_model(self):
         input_layer  = Input(shape = (None, 5))
-        #gru_layer_1  = layers.GRU(8, activation = "relu", dropout = 0.1, recurrent_dropout = 0.4, return_sequences = True)(input_layer)
-        #gru_layer_2  = layers.GRU(12, activation = "relu", dropout = 0.1, recurrent_dropout = 0.4, return_sequences = True)(gru_layer_1)
-        #gru_layer_3  = layers.GRU(16, activation = "relu", dropout = 0.1, recurrent_dropout = 0.4, return_sequences = True)(gru_layer_2)
-        #gru_layer_4  = layers.GRU(16, activation = "relu", dropout = 0.1, recurrent_dropout = 0.4, return_sequences = True)(gru_layer_3)
-        #gru_layer_5  = layers.GRU(10, activation = "relu", dropout = 0.1, recurrent_dropout = 0.4)(gru_layer_4)
-        gru_layer_1  = layers.GRU(8, activation = "relu", return_sequences = True)(input_layer)
-        gru_layer_2  = layers.GRU(12, activation = "relu", return_sequences = True)(gru_layer_1)
-        gru_layer_3  = layers.GRU(16, activation = "relu", return_sequences = True)(gru_layer_2)
-        gru_layer_4  = layers.GRU(16, activation = "relu", return_sequences = True)(gru_layer_3)
-        gru_layer_5  = layers.GRU(10, activation = "relu")(gru_layer_4)
-        output_1     = layers.Dense(1, name = "dc_power_in_15_minute")(gru_layer_5)
-        output_2     = layers.Dense(1, name = "ac_power_in_15_minute")(gru_layer_5)
-        output_3     = layers.Dense(1, name = "dc_power_in_30_minute")(gru_layer_5)
-        output_4     = layers.Dense(1, name = "ac_power_in_30_minute")(gru_layer_5)
-        
+        gru_layer_1  = layers.GRU(32, activation = "relu", return_sequences = True)(input_layer)
+        gru_layer_2  = layers.GRU(48, activation = "relu", return_sequences = True)(gru_layer_1)
+        gru_layer_3  = layers.GRU(48, activation = "relu", return_sequences = True)(gru_layer_2)
+        gru_layer_4  = layers.GRU(64, activation = "relu", return_sequences = True)(gru_layer_3)
+        gru_layer_5  = layers.GRU(128, activation = "relu", return_sequences = True)(gru_layer_4)
+        gru_layer_6  = layers.GRU(48, activation = "relu", return_sequences = True)(gru_layer_5)
+        gru_layer_7  = layers.GRU(32, activation = "relu")(gru_layer_6)
+        output_1     = layers.Dense(1, name = "a_day_dc_power")(gru_layer_7)
+        output_2     = layers.Dense(1, name = "a_day_ac_power")(gru_layer_7)
+        output_3     = layers.Dense(1, name = "two_days_dc_power")(gru_layer_7)
+        output_4     = layers.Dense(1, name = "two_days_ac_power")(gru_layer_7)
+
         self.model = Model(input_layer, [output_1, output_2, output_3, output_4])
 
     def model_training(self):
@@ -311,13 +266,36 @@ class power_generation_predict():
 
         self.model.summary()
 
-        self.model.compile(optimizer =  tf.keras.optimizers.Adam(self.learning_rate), loss = "mse")
+        test = iter(self.train_dataset)
+        a = test.get_next()
+
+        self.model.compile(optimizer =  tf.keras.optimizers.Adam(self.learning_rate), loss = "mae")
         #建立callback
         callback_path              = "model_callback_output/model_weights"
         tensorboard_path           = "tensorboard_output" 
         model_check_point_callback = tf.keras.callbacks.ModelCheckpoint(filepath = callback_path, monitor = "val_loss", save_best_only = True,
                                                                         save_weights_only = True)
         tensorboard_callback       = tf.keras.callbacks.TensorBoard(log_dir = tensorboard_path, histogram_freq = 1)
+        #history = self.model.fit(x = self.train_dataset, steps_per_epoch = self.train_data_steps_each_epoch, epochs = self.epochs)
+        history = self.model.fit(x = self.train_dataset, steps_per_epoch = self.train_data_steps_each_epoch, epochs = self.epochs,
+                                  validation_data = self.test_dataset, validation_steps = self.test_data_steps_each_epoch, 
+                                  callbacks = [model_check_point_callback, tensorboard_callback])
+
+    def loading_model_and_training(self):
+        #建立callback
+        callback_path              = "model_callback_output/model_weights"
+        tensorboard_path           = "tensorboard_output" 
+        model_check_point_callback = tf.keras.callbacks.ModelCheckpoint(filepath = callback_path, monitor = "val_loss", save_best_only = True,
+                                                                        save_weights_only = True)
+        tensorboard_callback       = tf.keras.callbacks.TensorBoard(log_dir = tensorboard_path, histogram_freq = 1)
+
+        self.creat_dataset()
+        self.creat_model()
+        self.model.summary()
+        self.model.load_weights(callback_path)
+
+        self.model.compile(optimizer =  tf.keras.optimizers.Adam(self.learning_rate), loss = "mae")
+        
         #history = self.model.fit(x = self.train_dataset, steps_per_epoch = self.train_data_steps_each_epoch, epochs = self.epochs)
         history = self.model.fit(x = self.train_dataset, steps_per_epoch = self.train_data_steps_each_epoch, epochs = self.epochs,
                                   validation_data = self.test_dataset, validation_steps = self.test_data_steps_each_epoch, 
