@@ -25,7 +25,7 @@ except Exception as e:
 #超參數設定
 data_contain_days    = 3
 data_predict_days    = 2
-epochs               = 100
+epochs               = 1000
 batch_size           = 32
 learning_rate        = 0.001
 weather_data_path    = "Plant_1_Weather_Sensor_Data.csv"
@@ -57,10 +57,11 @@ class power_generation_predict():
         #匯入資料
         self.weather_data   = tf.io.read_file(self.weather_data_path)
         #以分隔符號將資料分割並移除header
-        self.weather_data   = tf.strings.split(self.weather_data, "\n")
+        self.weather_data   = tf.strings.split(self.weather_data, "\r\n")
         self.weather_data   = tf.convert_to_tensor(self.weather_data.numpy()[1:])
         csv_column_datatype = [str(), int(), str(), float(), float(), float()]
-        self.weather_data   = tf.io.decode_csv(self.weather_data, csv_column_datatype)
+        #csv_column_datatype = [tf.string, tf.int32, tf.string, tf.float32, tf.float32, tf.float32]
+        self.weather_data   = tf.io.decode_csv(records = self.weather_data, record_defaults = csv_column_datatype)
         weatherdata_max     = []
         weatherdata_min     = []
         for index in range(3, len(self.weather_data)):
@@ -234,9 +235,10 @@ class power_generation_predict():
 
         return dataset, step_each_epoch
 
-    def creat_dataset(self):
+    def creat_dataset(self, training = True):
         self.load_csv_file()
-        self.change_generation_datetime_format()
+        if training:
+            self.change_generation_datetime_format()
         self.split_generation_data_by_inverter_and_match_waether_data_by_inverter_datetime()
 
         train_data, test_data = self.creat_train_data_and_test_data()
@@ -246,13 +248,20 @@ class power_generation_predict():
 
     def creat_model(self):
         input_layer  = Input(shape = (None, 5))
-        gru_layer_1  = layers.GRU(32, activation = "relu", return_sequences = True)(input_layer)
-        gru_layer_2  = layers.GRU(48, activation = "relu", return_sequences = True)(gru_layer_1)
-        gru_layer_3  = layers.GRU(48, activation = "relu", return_sequences = True)(gru_layer_2)
-        gru_layer_4  = layers.GRU(64, activation = "relu", return_sequences = True)(gru_layer_3)
-        gru_layer_5  = layers.GRU(128, activation = "relu", return_sequences = True)(gru_layer_4)
-        gru_layer_6  = layers.GRU(48, activation = "relu", return_sequences = True)(gru_layer_5)
-        gru_layer_7  = layers.GRU(32, activation = "relu")(gru_layer_6)
+        #gru_layer_1  = layers.GRU(32, return_sequences = True)(input_layer)
+        #gru_layer_2  = layers.GRU(48, return_sequences = True)(gru_layer_1)
+        #gru_layer_3  = layers.GRU(48, return_sequences = True)(gru_layer_2)
+        #gru_layer_4  = layers.GRU(64, return_sequences = True)(gru_layer_3)
+        #gru_layer_5  = layers.GRU(128, return_sequences = True)(gru_layer_4)
+        #gru_layer_6  = layers.GRU(48, return_sequences = True)(gru_layer_5)
+        #gru_layer_7  = layers.GRU(32)(gru_layer_6)
+        gru_layer_1  = layers.GRU(48, activation = "relu", recurrent_dropout = 0.3, return_sequences = True)(input_layer)
+        gru_layer_2  = layers.GRU(64, activation = "relu", recurrent_dropout = 0.3,return_sequences = True)(gru_layer_1)
+        gru_layer_3  = layers.GRU(64, activation = "relu", recurrent_dropout = 0.3,return_sequences = True)(gru_layer_2)
+        gru_layer_4  = layers.GRU(128, activation = "relu", recurrent_dropout = 0.3,return_sequences = True)(gru_layer_3)
+        gru_layer_5  = layers.GRU(256, activation = "relu", recurrent_dropout = 0.3,return_sequences = True)(gru_layer_4)
+        gru_layer_6  = layers.GRU(256, activation = "relu", recurrent_dropout = 0.3,return_sequences = True)(gru_layer_5)
+        gru_layer_7  = layers.GRU(128, activation = "relu", recurrent_dropout = 0.3,)(gru_layer_6)
         output_1     = layers.Dense(1, name = "a_day_dc_power")(gru_layer_7)
         output_2     = layers.Dense(1, name = "a_day_ac_power")(gru_layer_7)
         output_3     = layers.Dense(1, name = "two_days_dc_power")(gru_layer_7)
@@ -261,17 +270,17 @@ class power_generation_predict():
         self.model = Model(input_layer, [output_1, output_2, output_3, output_4])
 
     def model_training(self):
-        self.creat_dataset()
+        self.creat_dataset(training = True)
         self.creat_model()
 
         self.model.summary()
 
-        test = iter(self.train_dataset)
-        a = test.get_next()
+        #test = iter(self.train_dataset)
+        #a = test.get_next()
 
         self.model.compile(optimizer =  tf.keras.optimizers.Adam(self.learning_rate), loss = "mae")
         #建立callback
-        callback_path              = "model_callback_output/model_weights"
+        callback_path              = "model_callback_output/model_weight"
         tensorboard_path           = "tensorboard_output" 
         model_check_point_callback = tf.keras.callbacks.ModelCheckpoint(filepath = callback_path, monitor = "val_loss", save_best_only = True,
                                                                         save_weights_only = True)
@@ -283,13 +292,13 @@ class power_generation_predict():
 
     def loading_model_and_training(self):
         #建立callback
-        callback_path              = "model_callback_output/model_weights"
+        callback_path              = "model_callback_output/model_weight"
         tensorboard_path           = "tensorboard_output" 
         model_check_point_callback = tf.keras.callbacks.ModelCheckpoint(filepath = callback_path, monitor = "val_loss", save_best_only = True,
                                                                         save_weights_only = True)
         tensorboard_callback       = tf.keras.callbacks.TensorBoard(log_dir = tensorboard_path, histogram_freq = 1)
 
-        self.creat_dataset()
+        self.creat_dataset(training = True)
         self.creat_model()
         self.model.summary()
         self.model.load_weights(callback_path)
@@ -301,7 +310,24 @@ class power_generation_predict():
                                   validation_data = self.test_dataset, validation_steps = self.test_data_steps_each_epoch, 
                                   callbacks = [model_check_point_callback, tensorboard_callback])
 
+    def loading_model_and_evaluate(self):
+        self.weather_data_path    = "Plant_2_Weather_Sensor_Data.csv"
+        self.generation_data_path = "Plant_2_Generation_Data.csv"
+        callback_path             = "model_callback_output/model_weight"
+        #第二組資料的格式有異
+        #所以要用不同的做法
+        self.creat_dataset(training = False)
+        self.creat_model()
+        self.model.summary()
+        self.model.load_weights(callback_path)
+
+        self.model.compile(optimizer =  tf.keras.optimizers.Adam(self.learning_rate), loss = "mae")
+        history = self.model.evaluate(x = self.train_dataset, steps = self.train_data_steps_each_epoch)
+        
+
 generation_power_predict_model = power_generation_predict(weather_data_path, generation_data_path,
                                                           data_contain_days, data_predict_days, epochs, batch_size, learning_rate)
-generation_power_predict_model.model_training()
+#generation_power_predict_model.model_training()
+#generation_power_predict_model.loading_model_and_training()
+generation_power_predict_model.loading_model_and_evaluate()
 
